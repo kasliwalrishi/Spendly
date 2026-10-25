@@ -350,15 +350,181 @@ class AuthGate extends StatelessWidget {
   }
 }
 
-class _LoadingScreen extends StatelessWidget {
+// class _LoadingScreen extends StatelessWidget {
+//   const _LoadingScreen();
+
+//   @override
+//   Widget build(BuildContext context) => const Scaffold(
+//     body: Center(
+//       child: CircularProgressIndicator(),
+//     ),
+//   );
+// }
+class _LoadingScreen extends StatefulWidget {
   const _LoadingScreen();
 
   @override
-  Widget build(BuildContext context) => const Scaffold(
-    body: Center(
-      child: CircularProgressIndicator(),
-    ),
-  );
+  State<_LoadingScreen> createState() => _LoadingScreenState();
+}
+
+class _LoadingScreenState extends State<_LoadingScreen>
+    with TickerProviderStateMixin {
+  late final AnimationController _pulseController;
+  late final AnimationController _rotationController;
+  late final Animation<double> _pulseAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1300),
+    )..repeat(reverse: true);
+
+    _rotationController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 3),
+    )..repeat();
+
+    _pulseAnimation = Tween<double>(
+      begin: 0.92,
+      end: 1.08,
+    ).animate(
+      CurvedAnimation(
+        parent: _pulseController,
+        curve: Curves.easeInOut,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    _rotationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _canvas,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(28),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Animated Spendly logo
+                AnimatedBuilder(
+                  animation: _pulseAnimation,
+                  builder: (context, child) {
+                    return Transform.scale(
+                      scale: _pulseAnimation.value,
+                      child: child,
+                    );
+                  },
+                  child: Container(
+                    width: 104,
+                    height: 104,
+                    decoration: BoxDecoration(
+                      color: _navy,
+                      borderRadius: BorderRadius.circular(32),
+                      boxShadow: [
+                        BoxShadow(
+                          color: _navy.withValues(alpha: 0.16),
+                          blurRadius: 28,
+                          offset: const Offset(0, 12),
+                        ),
+                      ],
+                    ),
+                    child: const Icon(
+                      Icons.account_balance_wallet_rounded,
+                      size: 48,
+                      color: _mint,
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 30),
+
+                const Text(
+                  'Spendly',
+                  style: TextStyle(
+                    fontSize: 30,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -1,
+                    color: _navy,
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+
+                const Text(
+                  'Getting your finances ready',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: _ink,
+                  ),
+                ),
+
+                const SizedBox(height: 10),
+
+                const Text(
+                  'Please wait while we securely sync your expenses '
+                  'and prepare your dashboard.\n'
+                  'This may take up to a minute.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    height: 1.6,
+                    color: Color(0xFF667085),
+                  ),
+                ),
+
+                const SizedBox(height: 32),
+
+                // Rotating loading indicator
+                AnimatedBuilder(
+                  animation: _rotationController,
+                  builder: (context, child) {
+                    return Transform.rotate(
+                      angle: _rotationController.value * 2 * 3.141592653589793,
+                      child: child,
+                    );
+                  },
+                  child: SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 3,
+                      color: _navy,
+                      backgroundColor: _mint.withValues(alpha: 0.25),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 18),
+
+                const Text(
+                  'SECURELY CONNECTING',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 2,
+                    color: Color(0xFF667085),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _StartupError extends StatelessWidget {
