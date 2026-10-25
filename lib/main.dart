@@ -1,9 +1,17 @@
+
 // import 'dart:convert';
+
+// import 'package:flutter/foundation.dart';
+// import 'package:http/http.dart' as http;
 
 // import 'package:fl_chart/fl_chart.dart';
 // import 'package:flutter/material.dart';
 // import 'package:intl/intl.dart';
 // import 'package:shared_preferences/shared_preferences.dart';
+// import 'package:firebase_core/firebase_core.dart';
+// import 'package:firebase_auth/firebase_auth.dart';
+
+// import 'firebase_options.dart';
 
 // const _navy = Color(0xFF14213D),
 //     _mint = Color(0xFF3DDC97),
@@ -11,9 +19,8 @@
 //     _canvas = Color(0xFFF7F9FC);
 // Future<void> main() async {
 //   WidgetsFlutterBinding.ensureInitialized();
-//   final store = Store();
-//   await store.load();
-//   runApp(SpendlyApp(store));
+//   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+//   runApp(const SpendlyApp());
 // }
 
 // class Expense {
@@ -47,54 +54,237 @@
 // }
 
 // class Store extends ChangeNotifier {
+//   Store(this.userId);
+
+//   final String userId;
 //   final List<Expense> _items = [];
 //   double budget = 0;
-//   List<Expense> get items =>
-//       List.of(_items)..sort((a, b) => b.date.compareTo(a.date));
-//   Future<void> load() async {
-//     final p = await SharedPreferences.getInstance();
-//     final raw = p.getString('expenses_v1');
-//     if (raw != null) {
-//       _items.addAll(
-//         (jsonDecode(raw) as List).map(
-//           (x) => Expense.fromJson(x as Map<String, dynamic>),
-//         ),
-//       );
+
+//   // Web uses localhost; Android emulator reaches the host computer via
+//   // 10.0.2.2. For a physical phone, replace this with your computer's LAN IP.
+//   String get _baseUrl {
+//     if (kIsWeb) return 'http://localhost:3000';
+//     if (defaultTargetPlatform == TargetPlatform.android) {
+//       return 'http://10.0.2.2:3000';
 //     }
-//     budget = p.getDouble('budget_v1') ?? 0;
+//     return 'http://localhost:3000';
 //   }
 
-//   Future<void> _save() async => (await SharedPreferences.getInstance())
-//       .setString('expenses_v1', jsonEncode(_items.map((x) => x.json).toList()));
-//   Future<void> add(Expense e) async {
-//     _items.add(e);
-//     await _save();
+//   String get _expensesKey => 'expenses_v1_$userId';
+//   String get _budgetKey => 'budget_v1_$userId';
+//   String get _migrationKey => 'cloud_migration_v1_$userId';
+
+//   List<Expense> get items =>
+//       List.of(_items)..sort((a, b) => b.date.compareTo(a.date));
+
+//   Future<Map<String, String>> _headers() async {
+//     final user = FirebaseAuth.instance.currentUser;
+//     if (user == null || user.uid != userId) {
+//       throw Exception('Your session has expired. Please log in again.');
+//     }
+
+//     final token = await user.getIdToken();
+//     return {
+//       'Content-Type': 'application/json',
+//       'Authorization': 'Bearer $token',
+//     };
+//   }
+
+//   Future<http.Response> _request(
+//     String method,
+//     String path, {
+//     Object? body,
+//   }) async {
+//     final uri = Uri.parse('$_baseUrl$path');
+//     final headers = await _headers();
+
+//     switch (method) {
+//       case 'GET':
+//         return http
+//             .get(uri, headers: headers)
+//             .timeout(const Duration(seconds: 15));
+//       case 'POST':
+//         return http
+//             .post(uri, headers: headers, body: jsonEncode(body))
+//             .timeout(const Duration(seconds: 15));
+//       case 'PUT':
+//         return http
+//             .put(uri, headers: headers, body: jsonEncode(body))
+//             .timeout(const Duration(seconds: 15));
+//       case 'DELETE':
+//         return http
+//             .delete(uri, headers: headers)
+//             .timeout(const Duration(seconds: 15));
+//       default:
+//         throw UnsupportedError('Unsupported HTTP method: $method');
+//     }
+//   }
+
+//   void _checkResponse(http.Response response) {
+//     if (response.statusCode < 200 || response.statusCode >= 300) {
+//       String message = 'Cloud request failed (${response.statusCode}).';
+//       try {
+//         final decoded = jsonDecode(response.body);
+//         if (decoded is Map && decoded['error'] is String) {
+//           message = decoded['error'] as String;
+//         }
+//       } catch (_) {
+//         // Keep the generic message if the response is not JSON.
+//       }
+//       throw Exception(message);
+//     }
+//   }
+
+//   Future<void> load() async {
+//     final prefs = await SharedPreferences.getInstance();
+
+//     // Fetch cloud data first: MongoDB is now the source of truth.
+//     final expenseResponse = await _request('GET', '/api/expenses');
+//     _checkResponse(expenseResponse);
+//     final cloudList = jsonDecode(expenseResponse.body) as List<dynamic>;
+//     _items
+//       ..clear()
+//       ..addAll(
+//         cloudList.map((item) => Expense.fromJson(item as Map<String, dynamic>)),
+//       );
+
+//     final budgetResponse = await _request('GET', '/api/budget');
+//     _checkResponse(budgetResponse);
+//     final budgetJson = jsonDecode(budgetResponse.body) as Map<String, dynamic>;
+//     budget = (budgetJson['amount'] as num?)?.toDouble() ?? 0;
+
+//     // Migrate this account's previous local data once, but only if the cloud
+//     // has no expenses yet. Keep local values until migration succeeds.
+//     final migrated = prefs.getBool(_migrationKey) ?? false;
+//     if (!migrated && _items.isEmpty) {
+//       final raw =
+//           prefs.getString(_expensesKey) ?? prefs.getString('expenses_v1');
+//       final oldBudget =
+//           prefs.getDouble(_budgetKey) ?? prefs.getDouble('budget_v1') ?? 0;
+
+//       final localItems = raw == null
+//           ? <Expense>[]
+//           : (jsonDecode(raw) as List<dynamic>)
+//                 .map((item) => Expense.fromJson(item as Map<String, dynamic>))
+//                 .toList();
+
+//       for (final expense in localItems) {
+//         final response = await _request(
+//           'POST',
+//           '/api/expenses',
+//           body: expense.json,
+//         );
+
+//         // A conflict means this ID was uploaded during an earlier attempt.
+//         if (response.statusCode != 409) _checkResponse(response);
+//       }
+
+//       if (oldBudget > 0) {
+//         final response = await _request(
+//           'PUT',
+//           '/api/budget',
+//           body: {'amount': oldBudget},
+//         );
+//         _checkResponse(response);
+//       }
+
+//       if (localItems.isNotEmpty || oldBudget > 0) {
+//         final refreshed = await _request('GET', '/api/expenses');
+//         _checkResponse(refreshed);
+//         final refreshedList = jsonDecode(refreshed.body) as List<dynamic>;
+//         _items
+//           ..clear()
+//           ..addAll(
+//             refreshedList.map(
+//               (item) => Expense.fromJson(item as Map<String, dynamic>),
+//             ),
+//           );
+
+//         final refreshedBudget = await _request('GET', '/api/budget');
+//         _checkResponse(refreshedBudget);
+//         budget =
+//             ((jsonDecode(refreshedBudget.body)
+//                         as Map<String, dynamic>)['amount']
+//                     as num?)
+//                 ?.toDouble() ??
+//             0;
+//       }
+
+//       await prefs.setBool(_migrationKey, true);
+//       await prefs.remove('expenses_v1');
+//       await prefs.remove('budget_v1');
+//     }
+
+//     // Keep a local cache for a faster recovery if the network temporarily
+//     // fails, but all writes below go to the cloud first.
+//     await _saveLocalCache();
+//   }
+
+//   Future<void> _saveLocalCache() async {
+//     final prefs = await SharedPreferences.getInstance();
+//     await prefs.setString(
+//       _expensesKey,
+//       jsonEncode(_items.map((expense) => expense.json).toList()),
+//     );
+//     await prefs.setDouble(_budgetKey, budget);
+//   }
+
+//   Future<void> add(Expense expense) async {
+//     final response = await _request(
+//       'POST',
+//       '/api/expenses',
+//       body: expense.json,
+//     );
+//     _checkResponse(response);
+
+//     _items.add(expense);
+//     await _saveLocalCache();
 //     notifyListeners();
 //   }
 
-//   Future<void> update(Expense e) async {
-//     final i = _items.indexWhere((x) => x.id == e.id);
-//     if (i >= 0) _items[i] = e;
-//     await _save();
+//   Future<void> update(Expense expense) async {
+//     final response = await _request(
+//       'PUT',
+//       '/api/expenses/${Uri.encodeComponent(expense.id)}',
+//       body: expense.json,
+//     );
+//     _checkResponse(response);
+
+//     final index = _items.indexWhere((item) => item.id == expense.id);
+//     if (index >= 0) _items[index] = expense;
+//     await _saveLocalCache();
 //     notifyListeners();
 //   }
 
 //   Future<void> remove(String id) async {
-//     _items.removeWhere((x) => x.id == id);
-//     await _save();
+//     final response = await _request(
+//       'DELETE',
+//       '/api/expenses/${Uri.encodeComponent(id)}',
+//     );
+//     _checkResponse(response);
+
+//     _items.removeWhere((item) => item.id == id);
+//     await _saveLocalCache();
 //     notifyListeners();
 //   }
 
 //   Future<void> setBudget(double value) async {
+//     final response = await _request(
+//       'PUT',
+//       '/api/budget',
+//       body: {'amount': value},
+//     );
+//     _checkResponse(response);
+
 //     budget = value;
-//     await (await SharedPreferences.getInstance()).setDouble('budget_v1', value);
+//     await _saveLocalCache();
 //     notifyListeners();
 //   }
 // }
 
 // class SpendlyApp extends StatelessWidget {
-//   const SpendlyApp(this.store, {super.key});
-//   final Store store;
+//   const SpendlyApp({super.key});
+
 //   @override
 //   Widget build(BuildContext context) => MaterialApp(
 //     title: 'Spendly',
@@ -112,8 +302,290 @@
 //         displayColor: _ink,
 //       ),
 //     ),
-//     home: Home(store),
+//     home: const AuthGate(),
 //   );
+// }
+
+// /// Routes signed-out users to authentication and signed-in users to Spendly.
+// class AuthGate extends StatelessWidget {
+//   const AuthGate({super.key});
+
+//   @override
+//   Widget build(BuildContext context) {
+//     return StreamBuilder<User?>(
+//       stream: FirebaseAuth.instance.authStateChanges(),
+//       builder: (context, snapshot) {
+//         if (snapshot.connectionState == ConnectionState.waiting) {
+//           return const _LoadingScreen();
+//         }
+
+//         final user = snapshot.data;
+//         if (user == null) return const AuthScreen();
+
+//         return FutureBuilder<Store>(
+//           future: _loadStore(user.uid),
+//           builder: (context, storeSnapshot) {
+//             if (storeSnapshot.connectionState != ConnectionState.done) {
+//               return const _LoadingScreen();
+//             }
+//             if (storeSnapshot.hasError) {
+//               return _StartupError(message: storeSnapshot.error.toString());
+//             }
+//             return Home(storeSnapshot.data!);
+//           },
+//         );
+//       },
+//     );
+//   }
+
+//   Future<Store> _loadStore(String uid) async {
+//     final store = Store(uid);
+//     await store.load();
+//     return store;
+//   }
+// }
+
+// class _LoadingScreen extends StatelessWidget {
+//   const _LoadingScreen();
+
+//   @override
+//   Widget build(BuildContext context) =>
+//       const Scaffold(body: Center(child: CircularProgressIndicator()));
+// }
+
+// class _StartupError extends StatelessWidget {
+//   const _StartupError({required this.message});
+
+//   final String message;
+
+//   @override
+//   Widget build(BuildContext context) => Scaffold(
+//     body: Center(
+//       child: Padding(
+//         padding: const EdgeInsets.all(24),
+//         child: Text('Could not open Spendly.\\n$message'),
+//       ),
+//     ),
+//   );
+// }
+
+// class AuthScreen extends StatefulWidget {
+//   const AuthScreen({super.key});
+
+//   @override
+//   State<AuthScreen> createState() => _AuthScreenState();
+// }
+
+// class _AuthScreenState extends State<AuthScreen> {
+//   final _formKey = GlobalKey<FormState>();
+//   final _email = TextEditingController();
+//   final _password = TextEditingController();
+//   bool _isLogin = true;
+//   bool _busy = false;
+//   bool _hidePassword = true;
+//   String? _error;
+
+//   @override
+//   void dispose() {
+//     _email.dispose();
+//     _password.dispose();
+//     super.dispose();
+//   }
+
+//   Future<void> _submit() async {
+//     if (!_formKey.currentState!.validate()) return;
+
+//     setState(() {
+//       _busy = true;
+//       _error = null;
+//     });
+
+//     try {
+//       final auth = FirebaseAuth.instance;
+//       if (_isLogin) {
+//         await auth.signInWithEmailAndPassword(
+//           email: _email.text.trim(),
+//           password: _password.text,
+//         );
+//       } else {
+//         await auth.createUserWithEmailAndPassword(
+//           email: _email.text.trim(),
+//           password: _password.text,
+//         );
+//       }
+//       // AuthGate listens to authStateChanges and opens the dashboard.
+//     } on FirebaseAuthException catch (e) {
+//       setState(() => _error = _friendlyAuthError(e));
+//     } catch (_) {
+//       setState(() => _error = 'Something went wrong. Please try again.');
+//     } finally {
+//       if (mounted) setState(() => _busy = false);
+//     }
+//   }
+
+//   String _friendlyAuthError(FirebaseAuthException e) {
+//     switch (e.code) {
+//       case 'invalid-email':
+//         return 'Enter a valid email address.';
+//       case 'user-not-found':
+//       case 'wrong-password':
+//       case 'invalid-credential':
+//         return 'Email or password is incorrect.';
+//       case 'email-already-in-use':
+//         return 'An account with this email already exists.';
+//       case 'weak-password':
+//         return 'Choose a stronger password (at least 6 characters).';
+//       case 'operation-not-allowed':
+//         return 'Email/password sign-in is not enabled in Firebase Console.';
+//       case 'network-request-failed':
+//         return 'Network error. Check your internet connection.';
+//       default:
+//         return e.message ?? 'Authentication failed. Please try again.';
+//     }
+//   }
+
+//   @override
+//   Widget build(BuildContext context) {
+//     return Scaffold(
+//       body: SafeArea(
+//         child: Center(
+//           child: SingleChildScrollView(
+//             padding: const EdgeInsets.all(24),
+//             child: ConstrainedBox(
+//               constraints: const BoxConstraints(maxWidth: 430),
+//               child: _Surface(
+//                 child: Padding(
+//                   padding: const EdgeInsets.all(8),
+//                   child: Form(
+//                     key: _formKey,
+//                     child: Column(
+//                       crossAxisAlignment: CrossAxisAlignment.stretch,
+//                       children: [
+//                         Container(
+//                           width: 68,
+//                           height: 68,
+//                           alignment: Alignment.center,
+//                           decoration: BoxDecoration(
+//                             color: _navy,
+//                             borderRadius: BorderRadius.circular(22),
+//                           ),
+//                           child: const Icon(
+//                             Icons.account_balance_wallet_rounded,
+//                             color: _mint,
+//                             size: 34,
+//                           ),
+//                         ),
+//                         const SizedBox(height: 22),
+//                         Text(
+//                           _isLogin ? 'Welcome back' : 'Create your account',
+//                           style: Theme.of(context).textTheme.headlineMedium!
+//                               .copyWith(fontWeight: FontWeight.w800),
+//                         ),
+//                         const SizedBox(height: 8),
+//                         Text(
+//                           _isLogin
+//                               ? 'Sign in to continue to Spendly.'
+//                               : 'Sign up to start managing your spending.',
+//                           style: TextStyle(color: Colors.blueGrey.shade600),
+//                         ),
+//                         const SizedBox(height: 26),
+//                         TextFormField(
+//                           controller: _email,
+//                           keyboardType: TextInputType.emailAddress,
+//                           autofillHints: const [AutofillHints.email],
+//                           decoration: const InputDecoration(
+//                             labelText: 'Email address',
+//                             prefixIcon: Icon(Icons.email_outlined),
+//                             border: OutlineInputBorder(),
+//                           ),
+//                           validator: (value) {
+//                             final email = value?.trim() ?? '';
+//                             if (email.isEmpty || !email.contains('@')) {
+//                               return 'Enter a valid email address.';
+//                             }
+//                             return null;
+//                           },
+//                         ),
+//                         const SizedBox(height: 14),
+//                         TextFormField(
+//                           controller: _password,
+//                           obscureText: _hidePassword,
+//                           autofillHints: _isLogin
+//                               ? const [AutofillHints.password]
+//                               : const [AutofillHints.newPassword],
+//                           decoration: InputDecoration(
+//                             labelText: 'Password',
+//                             prefixIcon: const Icon(Icons.lock_outline),
+//                             border: const OutlineInputBorder(),
+//                             suffixIcon: IconButton(
+//                               onPressed: () => setState(
+//                                 () => _hidePassword = !_hidePassword,
+//                               ),
+//                               icon: Icon(
+//                                 _hidePassword
+//                                     ? Icons.visibility_outlined
+//                                     : Icons.visibility_off_outlined,
+//                               ),
+//                             ),
+//                           ),
+//                           validator: (value) {
+//                             if ((value ?? '').length < 6) {
+//                               return 'Password must be at least 6 characters.';
+//                             }
+//                             return null;
+//                           },
+//                           onFieldSubmitted: (_) => _busy ? null : _submit(),
+//                         ),
+//                         if (_error != null) ...[
+//                           const SizedBox(height: 14),
+//                           Text(
+//                             _error!,
+//                             style: const TextStyle(color: Colors.red),
+//                           ),
+//                         ],
+//                         const SizedBox(height: 20),
+//                         FilledButton(
+//                           onPressed: _busy ? null : _submit,
+//                           style: FilledButton.styleFrom(
+//                             backgroundColor: _navy,
+//                             minimumSize: const Size.fromHeight(52),
+//                           ),
+//                           child: _busy
+//                               ? const SizedBox(
+//                                   width: 22,
+//                                   height: 22,
+//                                   child: CircularProgressIndicator(
+//                                     strokeWidth: 2,
+//                                     color: Colors.white,
+//                                   ),
+//                                 )
+//                               : Text(_isLogin ? 'Log in' : 'Create account'),
+//                         ),
+//                         const SizedBox(height: 10),
+//                         TextButton(
+//                           onPressed: _busy
+//                               ? null
+//                               : () => setState(() {
+//                                   _isLogin = !_isLogin;
+//                                   _error = null;
+//                                 }),
+//                           child: Text(
+//                             _isLogin
+//                                 ? 'New to Spendly? Create an account'
+//                                 : 'Already have an account? Log in',
+//                           ),
+//                         ),
+//                       ],
+//                     ),
+//                   ),
+//                 ),
+//               ),
+//             ),
+//           ),
+//         ),
+//       ),
+//     );
+//   }
 // }
 
 // class Home extends StatefulWidget {
@@ -127,32 +599,40 @@
 //   int _tab = 0;
 //   @override
 //   Widget build(BuildContext context) {
-//     final pages = [
-//       Overview(widget.store),
-//       History(widget.store),
-//       Budget(widget.store),
-//     ];
 //     return Scaffold(
 //       body: SafeArea(
 //         child: AnimatedBuilder(
 //           animation: widget.store,
-//           builder: (_, _) => AnimatedSwitcher(
-//             duration: const Duration(milliseconds: 280),
-//             transitionBuilder: (child, animation) => FadeTransition(
-//               opacity: animation,
-//               child: SlideTransition(
-//                 position: Tween(begin: const Offset(.035, 0), end: Offset.zero)
-//                     .animate(
-//                       CurvedAnimation(
-//                         parent: animation,
-//                         curve: Curves.easeOutCubic,
+//           builder: (context, _) {
+//             // Recreate the selected page when Store notifies its listeners.
+//             // This ensures the visible page reads the latest expense data.
+//             final pages = <Widget>[
+//               Overview(widget.store),
+//               History(widget.store),
+//               Budget(widget.store),
+//             ];
+
+//             return AnimatedSwitcher(
+//               duration: const Duration(milliseconds: 280),
+//               transitionBuilder: (child, animation) => FadeTransition(
+//                 opacity: animation,
+//                 child: SlideTransition(
+//                   position:
+//                       Tween<Offset>(
+//                         begin: const Offset(.035, 0),
+//                         end: Offset.zero,
+//                       ).animate(
+//                         CurvedAnimation(
+//                           parent: animation,
+//                           curve: Curves.easeOutCubic,
+//                         ),
 //                       ),
-//                     ),
-//                 child: child,
+//                   child: child,
+//                 ),
 //               ),
-//             ),
-//             child: KeyedSubtree(key: ValueKey(_tab), child: pages[_tab]),
-//           ),
+//               child: KeyedSubtree(key: ValueKey(_tab), child: pages[_tab]),
+//             );
+//           },
 //         ),
 //       ),
 //       floatingActionButton: FloatingActionButton.extended(
@@ -255,13 +735,12 @@
 //         PageHeader(
 //           title: 'Spendly',
 //           subtitle: DateFormat('EEEE, d MMMM').format(now),
-//           trailing: Container(
-//             padding: const EdgeInsets.all(10),
-//             decoration: const BoxDecoration(
-//               color: Colors.white,
-//               shape: BoxShape.circle,
-//             ),
-//             child: const Icon(Icons.notifications_none_rounded),
+//           trailing: IconButton(
+//             tooltip: 'Log out',
+//             onPressed: () async {
+//               await FirebaseAuth.instance.signOut();
+//             },
+//             icon: const Icon(Icons.logout_rounded),
 //           ),
 //         ),
 //         Padding(
@@ -986,10 +1465,17 @@
 
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'firebase_options.dart';
 
 const _navy = Color(0xFF14213D),
     _mint = Color(0xFF3DDC97),
@@ -997,9 +1483,10 @@ const _navy = Color(0xFF14213D),
     _canvas = Color(0xFFF7F9FC);
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final store = Store();
-  await store.load();
-  runApp(SpendlyApp(store));
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+  runApp(const SpendlyApp());
 }
 
 class Expense {
@@ -1033,54 +1520,240 @@ class Expense {
 }
 
 class Store extends ChangeNotifier {
+  Store(this.userId);
+
+  final String userId;
   final List<Expense> _items = [];
   double budget = 0;
-  List<Expense> get items =>
-      List.of(_items)..sort((a, b) => b.date.compareTo(a.date));
-  Future<void> load() async {
-    final p = await SharedPreferences.getInstance();
-    final raw = p.getString('expenses_v1');
-    if (raw != null) {
-      _items.addAll(
-        (jsonDecode(raw) as List).map(
-          (x) => Expense.fromJson(x as Map<String, dynamic>),
-        ),
-      );
+
+  // Web uses localhost; Android emulator reaches the host computer via
+  // 10.0.2.2. For a physical phone, replace this with your computer's LAN IP.
+  String get _baseUrl {
+    if (kIsWeb) return 'http://localhost:3000';
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return 'http://10.0.2.2:3000';
     }
-    budget = p.getDouble('budget_v1') ?? 0;
+    return 'http://localhost:3000';
   }
 
-  Future<void> _save() async => (await SharedPreferences.getInstance())
-      .setString('expenses_v1', jsonEncode(_items.map((x) => x.json).toList()));
-  Future<void> add(Expense e) async {
-    _items.add(e);
-    await _save();
+  String get _expensesKey => 'expenses_v1_$userId';
+  String get _budgetKey => 'budget_v1_$userId';
+  String get _migrationKey => 'cloud_migration_v1_$userId';
+
+  List<Expense> get items =>
+      List.of(_items)..sort((a, b) => b.date.compareTo(a.date));
+
+  Future<Map<String, String>> _headers() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || user.uid != userId) {
+      throw Exception('Your session has expired. Please log in again.');
+    }
+
+    final token = await user.getIdToken();
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer $token',
+    };
+  }
+
+  Future<http.Response> _request(
+    String method,
+    String path, {
+    Object? body,
+  }) async {
+    final uri = Uri.parse('$_baseUrl$path');
+    final headers = await _headers();
+
+    switch (method) {
+      case 'GET':
+        return http.get(uri, headers: headers).timeout(
+          const Duration(seconds: 15),
+        );
+      case 'POST':
+        return http.post(
+          uri,
+          headers: headers,
+          body: jsonEncode(body),
+        ).timeout(const Duration(seconds: 15));
+      case 'PUT':
+        return http.put(
+          uri,
+          headers: headers,
+          body: jsonEncode(body),
+        ).timeout(const Duration(seconds: 15));
+      case 'DELETE':
+        return http.delete(uri, headers: headers).timeout(
+          const Duration(seconds: 15),
+        );
+      default:
+        throw UnsupportedError('Unsupported HTTP method: $method');
+    }
+  }
+
+  void _checkResponse(http.Response response) {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      String message = 'Cloud request failed (${response.statusCode}).';
+      try {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map && decoded['error'] is String) {
+          message = decoded['error'] as String;
+        }
+      } catch (_) {
+        // Keep the generic message if the response is not JSON.
+      }
+      throw Exception(message);
+    }
+  }
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Fetch cloud data first: MongoDB is now the source of truth.
+    final expenseResponse = await _request('GET', '/api/expenses');
+    _checkResponse(expenseResponse);
+    final cloudList = jsonDecode(expenseResponse.body) as List<dynamic>;
+    _items
+      ..clear()
+      ..addAll(
+        cloudList.map(
+          (item) => Expense.fromJson(item as Map<String, dynamic>),
+        ),
+      );
+
+    final budgetResponse = await _request('GET', '/api/budget');
+    _checkResponse(budgetResponse);
+    final budgetJson = jsonDecode(budgetResponse.body) as Map<String, dynamic>;
+    budget = (budgetJson['amount'] as num?)?.toDouble() ?? 0;
+
+    // Migrate this account's previous local data once, but only if the cloud
+    // has no expenses yet. Keep local values until migration succeeds.
+    final migrated = prefs.getBool(_migrationKey) ?? false;
+    if (!migrated && _items.isEmpty) {
+      final raw = prefs.getString(_expensesKey) ?? prefs.getString('expenses_v1');
+      final oldBudget =
+          prefs.getDouble(_budgetKey) ?? prefs.getDouble('budget_v1') ?? 0;
+
+      final localItems = raw == null
+          ? <Expense>[]
+          : (jsonDecode(raw) as List<dynamic>)
+              .map((item) => Expense.fromJson(item as Map<String, dynamic>))
+              .toList();
+
+      for (final expense in localItems) {
+        final response = await _request(
+          'POST',
+          '/api/expenses',
+          body: expense.json,
+        );
+
+        // A conflict means this ID was uploaded during an earlier attempt.
+        if (response.statusCode != 409) _checkResponse(response);
+      }
+
+      if (oldBudget > 0) {
+        final response = await _request(
+          'PUT',
+          '/api/budget',
+          body: {'amount': oldBudget},
+        );
+        _checkResponse(response);
+      }
+
+      if (localItems.isNotEmpty || oldBudget > 0) {
+        final refreshed = await _request('GET', '/api/expenses');
+        _checkResponse(refreshed);
+        final refreshedList = jsonDecode(refreshed.body) as List<dynamic>;
+        _items
+          ..clear()
+          ..addAll(
+            refreshedList.map(
+              (item) => Expense.fromJson(item as Map<String, dynamic>),
+            ),
+          );
+
+        final refreshedBudget = await _request('GET', '/api/budget');
+        _checkResponse(refreshedBudget);
+        budget = ((jsonDecode(refreshedBudget.body)
+                    as Map<String, dynamic>)['amount'] as num?)
+                ?.toDouble() ??
+            0;
+      }
+
+      await prefs.setBool(_migrationKey, true);
+      await prefs.remove('expenses_v1');
+      await prefs.remove('budget_v1');
+    }
+
+    // Keep a local cache for a faster recovery if the network temporarily
+    // fails, but all writes below go to the cloud first.
+    await _saveLocalCache();
+  }
+
+  Future<void> _saveLocalCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _expensesKey,
+      jsonEncode(_items.map((expense) => expense.json).toList()),
+    );
+    await prefs.setDouble(_budgetKey, budget);
+  }
+
+  Future<void> add(Expense expense) async {
+    final response = await _request(
+      'POST',
+      '/api/expenses',
+      body: expense.json,
+    );
+    _checkResponse(response);
+
+    _items.add(expense);
+    await _saveLocalCache();
     notifyListeners();
   }
 
-  Future<void> update(Expense e) async {
-    final i = _items.indexWhere((x) => x.id == e.id);
-    if (i >= 0) _items[i] = e;
-    await _save();
+  Future<void> update(Expense expense) async {
+    final response = await _request(
+      'PUT',
+      '/api/expenses/${Uri.encodeComponent(expense.id)}',
+      body: expense.json,
+    );
+    _checkResponse(response);
+
+    final index = _items.indexWhere((item) => item.id == expense.id);
+    if (index >= 0) _items[index] = expense;
+    await _saveLocalCache();
     notifyListeners();
   }
 
   Future<void> remove(String id) async {
-    _items.removeWhere((x) => x.id == id);
-    await _save();
+    final response = await _request(
+      'DELETE',
+      '/api/expenses/${Uri.encodeComponent(id)}',
+    );
+    _checkResponse(response);
+
+    _items.removeWhere((item) => item.id == id);
+    await _saveLocalCache();
     notifyListeners();
   }
 
   Future<void> setBudget(double value) async {
+    final response = await _request(
+      'PUT',
+      '/api/budget',
+      body: {'amount': value},
+    );
+    _checkResponse(response);
+
     budget = value;
-    await (await SharedPreferences.getInstance()).setDouble('budget_v1', value);
+    await _saveLocalCache();
     notifyListeners();
   }
 }
 
 class SpendlyApp extends StatelessWidget {
-  const SpendlyApp(this.store, {super.key});
-  final Store store;
+  const SpendlyApp({super.key});
+
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Spendly',
@@ -1098,8 +1771,360 @@ class SpendlyApp extends StatelessWidget {
         displayColor: _ink,
       ),
     ),
-    home: Home(store),
+    home: const AuthGate(),
   );
+}
+
+/// Routes signed-out users to authentication and signed-in users to Spendly.
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const _LoadingScreen();
+        }
+
+        final user = snapshot.data;
+        if (user == null) return const AuthScreen();
+
+        return FutureBuilder<Store>(
+          future: _loadStore(user.uid),
+          builder: (context, storeSnapshot) {
+            if (storeSnapshot.connectionState != ConnectionState.done) {
+              return const _LoadingScreen();
+            }
+            if (storeSnapshot.hasError) {
+              return _StartupError(message: storeSnapshot.error.toString());
+            }
+            return Home(storeSnapshot.data!);
+          },
+        );
+      },
+    );
+  }
+
+  Future<Store> _loadStore(String uid) async {
+    final store = Store(uid);
+    await store.load();
+    return store;
+  }
+}
+
+class _LoadingScreen extends StatelessWidget {
+  const _LoadingScreen();
+
+  @override
+  Widget build(BuildContext context) => const Scaffold(
+    body: Center(
+      child: CircularProgressIndicator(),
+    ),
+  );
+}
+
+class _StartupError extends StatelessWidget {
+  const _StartupError({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Text('Could not open Spendly.\\n$message'),
+      ),
+    ),
+  );
+}
+
+class AuthScreen extends StatefulWidget {
+  const AuthScreen({super.key});
+
+  @override
+  State<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends State<AuthScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  bool _isLogin = true;
+  bool _busy = false;
+  bool _hidePassword = true;
+  String? _error;
+
+  @override
+  void dispose() {
+    _email.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+
+    try {
+      final auth = FirebaseAuth.instance;
+      if (_isLogin) {
+        await auth.signInWithEmailAndPassword(
+          email: _email.text.trim(),
+          password: _password.text,
+        );
+      } else {
+        await auth.createUserWithEmailAndPassword(
+          email: _email.text.trim(),
+          password: _password.text,
+        );
+      }
+      // AuthGate listens to authStateChanges and opens the dashboard.
+    } on FirebaseAuthException catch (e) {
+      setState(() => _error = _friendlyAuthError(e));
+    } catch (_) {
+      setState(() => _error = 'Something went wrong. Please try again.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _signInWithGoogle() async {
+    if (_busy) return;
+
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+
+    try {
+      final auth = FirebaseAuth.instance;
+
+      if (kIsWeb) {
+        // Firebase's popup flow is the most reliable Google sign-in flow on web.
+        await auth.signInWithPopup(GoogleAuthProvider());
+      } else {
+        final googleUser = await GoogleSignIn().signIn();
+        if (googleUser == null) return; // User cancelled the Google picker.
+
+        final googleAuth = await googleUser.authentication;
+        final credential = GoogleAuthProvider.credential(
+          accessToken: googleAuth.accessToken,
+          idToken: googleAuth.idToken,
+        );
+        await auth.signInWithCredential(credential);
+      }
+      // AuthGate listens to authStateChanges and opens the dashboard.
+    } on FirebaseAuthException catch (e) {
+      if (mounted) setState(() => _error = _friendlyAuthError(e));
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = 'Google sign-in failed. Check your internet and Firebase setup. ($e)';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  String _friendlyAuthError(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'invalid-email':
+        return 'Enter a valid email address.';
+      case 'user-not-found':
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Email or password is incorrect.';
+      case 'email-already-in-use':
+        return 'An account with this email already exists.';
+      case 'weak-password':
+        return 'Choose a stronger password (at least 6 characters).';
+      case 'operation-not-allowed':
+        return 'Email/password sign-in is not enabled in Firebase Console.';
+      case 'network-request-failed':
+        return 'Network error. Check your internet connection.';
+      default:
+        return e.message ?? 'Authentication failed. Please try again.';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 430),
+              child: _Surface(
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Form(
+                    key: _formKey,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Container(
+                          width: 68,
+                          height: 68,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: _navy,
+                            borderRadius: BorderRadius.circular(22),
+                          ),
+                          child: const Icon(
+                            Icons.account_balance_wallet_rounded,
+                            color: _mint,
+                            size: 34,
+                          ),
+                        ),
+                        const SizedBox(height: 22),
+                        Text(
+                          _isLogin ? 'Welcome back' : 'Create your account',
+                          style: Theme.of(context).textTheme.headlineMedium!
+                              .copyWith(fontWeight: FontWeight.w800),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _isLogin
+                              ? 'Sign in to continue to Spendly.'
+                              : 'Sign up to start managing your spending.',
+                          style: TextStyle(color: Colors.blueGrey.shade600),
+                        ),
+                        const SizedBox(height: 26),
+                        TextFormField(
+                          controller: _email,
+                          keyboardType: TextInputType.emailAddress,
+                          autofillHints: const [AutofillHints.email],
+                          decoration: const InputDecoration(
+                            labelText: 'Email address',
+                            prefixIcon: Icon(Icons.email_outlined),
+                            border: OutlineInputBorder(),
+                          ),
+                          validator: (value) {
+                            final email = value?.trim() ?? '';
+                            if (email.isEmpty || !email.contains('@')) {
+                              return 'Enter a valid email address.';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 14),
+                        TextFormField(
+                          controller: _password,
+                          obscureText: _hidePassword,
+                          autofillHints: _isLogin
+                              ? const [AutofillHints.password]
+                              : const [AutofillHints.newPassword],
+                          decoration: InputDecoration(
+                            labelText: 'Password',
+                            prefixIcon: const Icon(Icons.lock_outline),
+                            border: const OutlineInputBorder(),
+                            suffixIcon: IconButton(
+                              onPressed: () => setState(
+                                () => _hidePassword = !_hidePassword,
+                              ),
+                              icon: Icon(
+                                _hidePassword
+                                    ? Icons.visibility_outlined
+                                    : Icons.visibility_off_outlined,
+                              ),
+                            ),
+                          ),
+                          validator: (value) {
+                            if ((value ?? '').length < 6) {
+                              return 'Password must be at least 6 characters.';
+                            }
+                            return null;
+                          },
+                          onFieldSubmitted: (_) => _busy ? null : _submit(),
+                        ),
+                        if (_error != null) ...[
+                          const SizedBox(height: 14),
+                          Text(
+                            _error!,
+                            style: const TextStyle(color: Colors.red),
+                          ),
+                        ],
+                        const SizedBox(height: 20),
+                        FilledButton(
+                          onPressed: _busy ? null : _submit,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: _navy,
+                            minimumSize: const Size.fromHeight(52),
+                          ),
+                          child: _busy
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : Text(_isLogin ? 'Log in' : 'Create account'),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            const Expanded(child: Divider()),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              child: Text(
+                                'OR',
+                                style: TextStyle(color: Colors.blueGrey.shade500),
+                              ),
+                            ),
+                            const Expanded(child: Divider()),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        OutlinedButton.icon(
+                          onPressed: _busy ? null : _signInWithGoogle,
+                          icon: const Icon(Icons.g_mobiledata_rounded, size: 30),
+                          label: const Text('Continue with Google'),
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(52),
+                            foregroundColor: _ink,
+                            side: BorderSide(color: Colors.blueGrey.shade200),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextButton(
+                          onPressed: _busy
+                              ? null
+                              : () => setState(() {
+                                  _isLogin = !_isLogin;
+                                  _error = null;
+                                }),
+                          child: Text(
+                            _isLogin
+                                ? 'New to Spendly? Create an account'
+                                : 'Already have an account? Log in',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class Home extends StatefulWidget {
@@ -1251,13 +2276,12 @@ class Overview extends StatelessWidget {
         PageHeader(
           title: 'Spendly',
           subtitle: DateFormat('EEEE, d MMMM').format(now),
-          trailing: Container(
-            padding: const EdgeInsets.all(10),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.notifications_none_rounded),
+          trailing: IconButton(
+            tooltip: 'Log out',
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+            },
+            icon: const Icon(Icons.logout_rounded),
           ),
         ),
         Padding(
@@ -1979,4 +3003,5 @@ class Empty extends StatelessWidget {
     ),
   );
 }
+
 
