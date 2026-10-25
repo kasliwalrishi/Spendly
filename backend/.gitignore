@@ -1,0 +1,10 @@
+node_modules/
+# Private credentials
+.env
+**/.env
+serviceAccount.json
+**/serviceAccount.json
+serviceAccountKey.json
+**/serviceAccountKey.json
+serviceAccountKey.json.json
+**/serviceAccountKey.json.json
