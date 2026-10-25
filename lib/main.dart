@@ -103,23 +103,23 @@ class Store extends ChangeNotifier {
     switch (method) {
       case 'GET':
         return http.get(uri, headers: headers).timeout(
-          const Duration(seconds: 15),
+          const Duration(seconds: 90),
         );
       case 'POST':
         return http.post(
           uri,
           headers: headers,
           body: jsonEncode(body),
-        ).timeout(const Duration(seconds: 15));
+        ).timeout(const Duration(seconds: 90));
       case 'PUT':
         return http.put(
           uri,
           headers: headers,
           body: jsonEncode(body),
-        ).timeout(const Duration(seconds: 15));
+        ).timeout(const Duration(seconds: 90));
       case 'DELETE':
         return http.delete(uri, headers: headers).timeout(
-          const Duration(seconds: 15),
+          const Duration(seconds: 90),
         );
       default:
         throw UnsupportedError('Unsupported HTTP method: $method');
